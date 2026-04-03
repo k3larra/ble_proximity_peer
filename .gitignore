@@ -1,0 +1,11 @@
+# Arduino CLI / IDE build output
+build/
+dist/
+
+# Arduino temporary files
+*.tmp
+*.bak
+
+# OS / editor noise
+Thumbs.db
+Desktop.ini
