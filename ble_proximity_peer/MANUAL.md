@@ -46,14 +46,22 @@ In this version:
 
 ## Quick Start
 
+> **Classroom note: choose a unique pair name before uploading.**
+>
+> If many students use this sketch in the same room, each pair of boards should use its own `DEVICE_NAME`.
+> The two boards that should talk to each other must have identical names.
+> Other pairs should use different names, for example `Nano33-Pair-01`, `Nano33-Pair-02`, and `Nano33-Pair-03`.
+
 1. Connect both boards by USB.
-2. Upload the same sketch to both boards.
-3. Restart both boards if needed.
-4. Wait a few seconds.
-5. When the connection is working, both boards should usually be green when idle.
-6. Move an object close to the sensor on one board.
-7. That board should turn purple.
-8. The other board should blink red.
+2. Check the `DEVICE_NAME` near the top of the sketch.
+3. Make sure both boards in your pair use the same `DEVICE_NAME`.
+4. Upload the sketch to both boards.
+5. Restart both boards if needed.
+6. Wait a few seconds.
+7. When the connection is working, both boards should usually be green when idle.
+8. Move an object close to the sensor on one board.
+9. That board should turn purple.
+10. The other board should blink red.
 
 ## The Three Main Parts of the Code
 
@@ -129,6 +137,7 @@ This can be replaced with:
 
 ## Important Settings Near the Top of the Sketch
 
+- `DEVICE_NAME` - must be identical on the two boards in one pair, and different from other pairs in the room
 - `EVENT_ON_THRESHOLD`
 - `EVENT_OFF_THRESHOLD`
 - `EVENT_IS_ON_WHEN_VALUE_IS_HIGH`
