@@ -12,6 +12,8 @@ const char* SERVICE_UUID = "19B10010-E8F2-537E-4F6C-D104768A1214";
 const char* OUTGOING_EVENT_UUID = "19B10011-E8F2-537E-4F6C-D104768A1214";
 const char* INCOMING_EVENT_UUID = "19B10012-E8F2-537E-4F6C-D104768A1214";
 
+const bool DEBUG_BLE = false;
+
 const int EVENT_ON_THRESHOLD = 200;
 const int EVENT_OFF_THRESHOLD = 150;
 const bool EVENT_IS_ON_WHEN_VALUE_IS_HIGH = false;
@@ -19,6 +21,9 @@ const bool EVENT_IS_ON_WHEN_VALUE_IS_HIGH = false;
 const unsigned long SENSOR_SAMPLE_MS = 50;
 const unsigned long LINK_UPDATE_MS = 80;
 const unsigned long PEER_TIMEOUT_MS = 1000;
+const unsigned long ROLE_RETRY_MS = 8000;
+const unsigned long SEARCH_ADVERTISE_MS = 4000;
+const unsigned long SEARCH_SCAN_MS = 6000;
 const unsigned long BLINK_INTERVAL_MS = 120;
 
 BLEService peerService(SERVICE_UUID);
@@ -37,11 +42,14 @@ BLECharacteristic remoteIncomingEventCharacteristic;
 String peerAddress;
 bool roleLocked = false;
 bool preferCentralRole = false;
+bool searchScanMode = true;
 
 unsigned long lastSensorSampleMs = 0;
 unsigned long lastLinkUpdateMs = 0;
 unsigned long lastPeerSeenMs = 0;
 unsigned long lastBlinkMs = 0;
+unsigned long disconnectedSinceMs = 0;
+unsigned long lastSearchModeChangeMs = 0;
 
 enum LinkRole {
   ROLE_WAITING,
@@ -50,6 +58,29 @@ enum LinkRole {
 };
 
 LinkRole currentRole = ROLE_WAITING;
+
+const char* roleName(LinkRole role) {
+  if (role == ROLE_PERIPHERAL) {
+    return "PERIPHERAL";
+  }
+
+  if (role == ROLE_CENTRAL) {
+    return "CENTRAL";
+  }
+
+  return "WAITING";
+}
+
+void debugBle(String message) {
+  if (!DEBUG_BLE) {
+    return;
+  }
+
+  Serial.print("[");
+  Serial.print(millis());
+  Serial.print("] ");
+  Serial.println(message);
+}
 
 void setRgb(bool redOn, bool greenOn, bool blueOn) {
   digitalWrite(LEDR, redOn ? LOW : HIGH);
@@ -115,18 +146,57 @@ void updateOutgoingCharacteristic() {
   outgoingEventCharacteristic.writeValue(localEventActive ? 1 : 0);
 }
 
-void enterDiscoveryMode() {
+int hexValue(char value) {
+  if (value >= '0' && value <= '9') {
+    return value - '0';
+  }
+
+  if (value >= 'a' && value <= 'f') {
+    return value - 'a' + 10;
+  }
+
+  if (value >= 'A' && value <= 'F') {
+    return value - 'A' + 10;
+  }
+
+  return 0;
+}
+
+bool initialSearchModeFromAddress() {
+  if (myAddress.length() == 0) {
+    return true;
+  }
+
+  return (hexValue(myAddress.charAt(myAddress.length() - 1)) % 2) == 0;
+}
+
+void startSearchMode(bool scanMode) {
+  searchScanMode = scanMode;
+  lastSearchModeChangeMs = millis();
   BLE.stopScan();
-  BLE.advertise();
-  BLE.scan(true);
+  BLE.stopAdvertise();
+
+  if (searchScanMode) {
+    debugBle("search mode: scan only");
+    BLE.scan(true);
+  } else {
+    debugBle("search mode: advertise only");
+    BLE.advertise();
+  }
+}
+
+void enterDiscoveryMode() {
+  startSearchMode(searchScanMode);
 }
 
 void enterPeripheralWaitMode() {
+  debugBle("enterPeripheralWaitMode: advertise only");
   BLE.stopScan();
   BLE.advertise();
 }
 
 void resetLinkState() {
+  debugBle("resetLinkState from role " + String(roleName(currentRole)));
   connectedPeripheral = BLEDevice();
   remoteOutgoingEventCharacteristic = BLECharacteristic();
   remoteIncomingEventCharacteristic = BLECharacteristic();
@@ -134,12 +204,9 @@ void resetLinkState() {
   remotePeerSeen = false;
   currentRole = ROLE_WAITING;
   lastLinkUpdateMs = 0;
+  disconnectedSinceMs = millis();
 
-  if (roleLocked && !preferCentralRole) {
-    enterPeripheralWaitMode();
-  } else {
-    enterDiscoveryMode();
-  }
+  enterDiscoveryMode();
 }
 
 bool isCandidatePeer(BLEDevice candidate) {
@@ -170,40 +237,85 @@ void lockRoleFromCandidate(BLEDevice candidate) {
   peerAddress = candidate.address();
   preferCentralRole = shouldConnectToCandidate(candidate);
   roleLocked = true;
+  disconnectedSinceMs = millis();
 
-  if (preferCentralRole) {
-    enterDiscoveryMode();
-  } else {
-    enterPeripheralWaitMode();
+  debugBle("lockRole peer=" + peerAddress + " prefer=" + String(preferCentralRole ? "CENTRAL" : "PERIPHERAL"));
+  enterDiscoveryMode();
+}
+
+void updateSearchModeIfNeeded() {
+  unsigned long searchModeMs = searchScanMode ? SEARCH_SCAN_MS : SEARCH_ADVERTISE_MS;
+
+  if (millis() - lastSearchModeChangeMs < searchModeMs) {
+    return;
   }
+
+  startSearchMode(!searchScanMode);
+}
+
+void retryDiscoveryIfStuck() {
+  if (disconnectedSinceMs == 0) {
+    disconnectedSinceMs = millis();
+  }
+
+  if (!roleLocked || millis() - disconnectedSinceMs < ROLE_RETRY_MS) {
+    return;
+  }
+
+  roleLocked = false;
+  preferCentralRole = false;
+  peerAddress = "";
+  disconnectedSinceMs = millis();
+  debugBle("role retry timeout: clear locked role");
+  enterDiscoveryMode();
 }
 
 bool connectAsCentral(BLEDevice candidate) {
+  debugBle("connectAsCentral start peer=" + candidate.address());
   BLE.stopScan();
+  BLE.stopAdvertise();
 
   if (!candidate.connect()) {
-    BLE.scan(true);
+    debugBle("connectAsCentral failed: connect()");
+    enterDiscoveryMode();
     return false;
   }
 
-  if (!candidate.discoverAttributes()) {
+  debugBle("connectAsCentral connected, discovering attributes");
+  delay(250);
+
+  bool attributesDiscovered = false;
+  for (int attempt = 1; attempt <= 3; attempt++) {
+    if (candidate.discoverAttributes()) {
+      attributesDiscovered = true;
+      break;
+    }
+
+    debugBle("connectAsCentral discoverAttributes retry " + String(attempt));
+    delay(250);
+  }
+
+  if (!attributesDiscovered) {
+    debugBle("connectAsCentral failed: discoverAttributes()");
     candidate.disconnect();
-    BLE.scan(true);
+    enterDiscoveryMode();
     return false;
   }
 
   BLEService remoteService = candidate.service(SERVICE_UUID);
   if (!remoteService) {
+    debugBle("connectAsCentral failed: service missing");
     candidate.disconnect();
-    BLE.scan(true);
+    enterDiscoveryMode();
     return false;
   }
 
   BLECharacteristic remoteOutgoing = candidate.characteristic(OUTGOING_EVENT_UUID);
   BLECharacteristic remoteIncoming = candidate.characteristic(INCOMING_EVENT_UUID);
   if (!remoteOutgoing || !remoteIncoming) {
+    debugBle("connectAsCentral failed: characteristic missing");
     candidate.disconnect();
-    BLE.scan(true);
+    enterDiscoveryMode();
     return false;
   }
 
@@ -211,22 +323,22 @@ bool connectAsCentral(BLEDevice candidate) {
   remoteOutgoingEventCharacteristic = remoteOutgoing;
   remoteIncomingEventCharacteristic = remoteIncoming;
   currentRole = ROLE_CENTRAL;
+  disconnectedSinceMs = 0;
   remotePeerSeen = true;
   lastPeerSeenMs = millis();
   BLE.stopAdvertise();
+  debugBle("connectAsCentral success peer=" + candidate.address());
   return true;
 }
 
 void tryToBecomeCentral() {
   if (BLE.connected()) {
     currentRole = ROLE_PERIPHERAL;
+    disconnectedSinceMs = 0;
     remotePeerSeen = true;
     lastPeerSeenMs = millis();
     BLE.stopScan();
-    return;
-  }
-
-  if (roleLocked && !preferCentralRole) {
+    debugBle("connected as peripheral");
     return;
   }
 
@@ -235,12 +347,10 @@ void tryToBecomeCentral() {
     return;
   }
 
+  debugBle("candidate found name=" + candidate.localName() + " address=" + candidate.address());
+
   if (!roleLocked) {
     lockRoleFromCandidate(candidate);
-  }
-
-  if (!preferCentralRole) {
-    return;
   }
 
   connectAsCentral(candidate);
@@ -253,6 +363,7 @@ void updatePeripheralLink() {
   }
 
   currentRole = ROLE_PERIPHERAL;
+  disconnectedSinceMs = 0;
   remotePeerSeen = true;
   lastPeerSeenMs = millis();
   updateOutgoingCharacteristic();
@@ -292,7 +403,13 @@ void updateLink() {
   } else if (BLE.connected()) {
     updatePeripheralLink();
   } else {
+    if (currentRole == ROLE_PERIPHERAL) {
+      resetLinkState();
+    }
+
     currentRole = ROLE_WAITING;
+    retryDiscoveryIfStuck();
+    updateSearchModeIfNeeded();
     tryToBecomeCentral();
   }
 
@@ -363,6 +480,7 @@ void setup() {
   outgoingEventCharacteristic.writeValue((byte)0);
   incomingEventCharacteristic.writeValue((byte)0);
 
+  searchScanMode = initialSearchModeFromAddress();
   enterDiscoveryMode();
 }
 

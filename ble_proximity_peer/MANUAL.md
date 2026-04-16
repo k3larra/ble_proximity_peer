@@ -3,7 +3,7 @@
 This project uses two Arduino Nano 33 BLE Sense boards.
 
 Both boards run the same sketch:
-[ble_proximity_peer.ino](C:/Users/K3LARA/Box/Jobb%20(lars.holmberg@mah.se%203)/KD104B_IDF_VT26/agent3/ble_proximity_peer/ble_proximity_peer.ino)
+[ble_proximity_peer.ino](ble_proximity_peer.ino)
 
 ## The Idea
 
@@ -57,7 +57,7 @@ In this version:
 3. Make sure both boards in your pair use the same `DEVICE_NAME`.
 4. Upload the sketch to both boards.
 5. Restart both boards if needed.
-6. Wait a few seconds.
+6. Wait a few seconds. If one board starts much later than the other, connection can take up to about 10 seconds.
 7. When the connection is working, both boards should usually be green when idle.
 8. Move an object close to the sensor on one board.
 9. That board should turn purple.
@@ -82,6 +82,13 @@ Main functions:
 This part sends the local event to the other board and receives the other board's event.
 
 Students usually do not need to change this section.
+
+When no peer is connected, each board alternates between two search modes:
+
+- advertising, where it waits for the other board to connect
+- scanning, where it looks for the other board and tries to connect
+
+This makes the pair recover if one board is started later, unplugged, or reset.
 
 ### 3. Action
 
@@ -175,6 +182,8 @@ Then upload the sketch again and test both boards.
 ## Troubleshooting
 
 - If both boards stay blue, the BLE connection has not formed yet.
+- If one board is started later than the other, wait at least 10-15 seconds. The boards take turns advertising and scanning until they find each other.
+- If one board has been unplugged or reset, the pair should reconnect automatically after a short wait.
 - If the boards connect and then disconnect repeatedly, restart both boards and check that both have the same sketch version.
 - If one board turns purple but the other board does not blink red, upload the same sketch again to both boards.
 - If the event seems inverted, test `EVENT_IS_ON_WHEN_VALUE_IS_HIGH`.
