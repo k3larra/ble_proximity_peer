@@ -1,47 +1,90 @@
-# BLE Peacock Pair
+# BLE Prototyping Examples
 
-This branch now uses two separate Arduino sketches for a one-way BLE interaction on Arduino Nano 33 BLE Sense Rev2 boards.
+This repository now contains three Arduino sketches for BLE-based interactive prototyping with the Arduino Nano 33 BLE Sense family.
+
+## Sketches
+
+### 1. Symmetric proximity example
+
+- `ble_proximity_peer/ble_proximity_peer.ino`
+
+Both boards run the same sketch and behave symmetrically.
+
+- each board reads its own proximity sensor
+- each board can trigger the other board
+- the other board blinks red when a local event is active
+
+This is the simpler peer-to-peer teaching example and still works well for slower, more stable sensor states.
+
+### 2. One-way motion sender
 
 - `ble_motion_shaker/ble_motion_shaker.ino`
+
+This is the `SHAKER` sketch.
+
+- it runs on the board inside the chick
+- it reads the Rev2 IMU
+- it computes a motion level from short RMS windows
+- it advertises that motion level over BLE
+
+### 3. One-way motion responder
+
 - `ble_motion_responder/ble_motion_responder.ino`
 
-The direction is fixed:
+This is the `RESPONDER` sketch.
 
-- the `SHAKER` board is the chick
-- the `RESPONDER` board is the father
+- it runs on the board inside the father
+- it scans for the shaker
+- it reads the shaker motion level over BLE
+- it blinks red based on the received intensity
 
-When the shaker board is handled roughly, it sends a motion level over BLE and the responder board blinks red. Stronger motion causes faster blinking.
+## Which Pattern To Use
 
-## Why It Is Split
+### Symmetric pattern
 
-The earlier combined sketch tried to support both roles in one file. That made the BLE logic harder to reason about and harder for students to modify.
+The symmetric pattern works best when the sensor becomes a stable event state, for example:
 
-This version separates the responsibilities cleanly:
+- proximity near / far
+- button pressed / not pressed
+- switches
+- slow threshold-based sensors
 
-- the shaker sketch reads the IMU and advertises motion
-- the responder sketch connects and reacts
+Why it works:
 
-That makes it easier to add new behavior such as:
+- the signal changes relatively slowly
+- the event often stays on long enough to be resent
+- a missed BLE update is less noticeable
 
-- servos
-- sound
-- other outputs on the responder
+### One-way pattern
 
-## Hardware
+The one-way pattern works better when the input is brief, bursty, or noisy, for example:
 
-This version is for:
+- motion from an IMU
+- shaking
+- taps
+- fast expressive gestures
+- sensors where intensity changes quickly
 
-- Arduino Nano 33 BLE Sense Rev2
+Why it helps:
 
-It uses the built-in BMI270/BMM150 IMU through:
+- one board only sends
+- one board only receives and reacts
+- the BLE transport becomes simpler
+- students can focus on the output object without changing the sensing object
 
-- `Arduino_BMI270_BMM150`
+For the peacock chick / father project, the one-way pattern is the recommended one.
 
-## LED Meanings
+## Hardware Notes
+
+- `ble_proximity_peer` was kept as the original symmetric example
+- the split motion sketches are intended for Arduino Nano 33 BLE Sense Rev2
+- the motion sketches use `Arduino_BMI270_BMM150`
+
+## LED Meanings For The Motion Pair
 
 ### Shaker
 
-- Blue: waiting for a BLE connection
+- Blue: waiting for BLE connection
 - Cyan: connected and idle
 - Purple: motion is currently active enough to send
 - Solid red: startup error
@@ -53,30 +96,15 @@ It uses the built-in BMI270/BMM150 IMU through:
 - Blinking red: reacting to received motion
 - Solid red: startup error
 
-## Files
+## Sensitivity Tuning For The Shaker
 
-### `ble_motion_shaker/ble_motion_shaker.ino`
-
-This sketch:
-
-- reads acceleration
-- computes a motion level from short RMS windows
-- quantizes the level to `0..5`
-- advertises that level over BLE
-
-Students will mainly edit:
-
-- thresholds
-- motion mapping
-- local shaker feedback
-
-Sensitivity settings near the top of the shaker sketch:
+These settings are near the top of `ble_motion_shaker.ino`:
 
 - `MOTION_START_THRESHOLD`
   Raise this if the shaker reacts too easily.
-  Lower it if stronger handling is required before anything happens.
+  Lower it if stronger handling is needed before anything happens.
 - `MOTION_STOP_THRESHOLD`
-  Raise this if the shaker stays active for too long after movement stops.
+  Raise this if the shaker stays active too long after movement stops.
   Lower it if the trigger turns off too quickly.
 - `MOTION_FULL_SCALE`
   Lower this if strong shaking should reach the highest response more easily.
@@ -87,34 +115,25 @@ Sensitivity settings near the top of the shaker sketch:
 - `MOTION_LEVEL_MAX`
   Changes how many motion steps are sent to the responder.
 
-### `ble_motion_responder/ble_motion_responder.ino`
+## Suggested Uploads
 
-This sketch:
+### Symmetric classroom demo
 
-- scans for the shaker
-- connects to the shaker BLE service
-- reads the shaker motion characteristic
-- blinks the red LED based on received intensity
+1. Upload `ble_proximity_peer.ino` to both boards.
+2. Test the proximity event-action behavior.
 
-Students will mainly edit:
+### Peacock chick / father project
 
-- the output behavior
-- blink pattern
-- servo or motor response
-
-## Upload Order
-
-1. Upload `ble_motion_shaker.ino` to the board that will go inside the chick.
-2. Upload `ble_motion_responder.ino` to the board that will go inside the father.
+1. Upload `ble_motion_shaker.ino` to the chick board.
+2. Upload `ble_motion_responder.ino` to the father board.
 3. Power both boards.
 4. Wait for the BLE link to form.
-5. Shake the shaker board and watch the responder react.
+5. Shake the chick and watch the father react.
 
-## Current Behavior
+## Manual
 
-- the BLE direction is intentionally one-way
-- the shaker always publishes
-- the responder always listens
-- there is no role negotiation in the application logic
+The original student-facing manual is here:
 
-That is deliberate because it is simpler and more reliable for this project.
+- `ble_proximity_peer/MANUAL.md`
+
+It now also includes guidance on when to choose a symmetric BLE example and when a one-way design is a better fit.
