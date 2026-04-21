@@ -1,17 +1,6 @@
 #include <ArduinoBLE.h>
-
-// Set to 1 before uploading to a Nano 33 BLE Sense Rev2.
-// Leave it at 0 for the earlier Nano 33 BLE Sense boards.
-#ifndef USE_REV2_IMU
-#define USE_REV2_IMU 1
-#endif
-
-#if USE_REV2_IMU
 #include <Arduino_BMI270_BMM150.h>
-#else
 #include <Arduino_LSM9DS1.h>
-#endif
-
 #include <math.h>
 
 // ============================================================
@@ -46,6 +35,12 @@ BLEService peerService(SERVICE_UUID);
 BLEByteCharacteristic outgoingEventCharacteristic(OUTGOING_EVENT_UUID, BLERead | BLENotify);
 BLEByteCharacteristic incomingEventCharacteristic(INCOMING_EVENT_UUID, BLERead | BLEWrite | BLEWriteWithoutResponse);
 
+enum ImuType {
+  IMU_TYPE_UNKNOWN,
+  IMU_TYPE_REV2,
+  IMU_TYPE_REV1
+};
+
 String myAddress;
 bool remotePeerSeen = false;
 bool blinkState = false;
@@ -65,8 +60,8 @@ BLECharacteristic remoteOutgoingEventCharacteristic;
 BLECharacteristic remoteIncomingEventCharacteristic;
 String peerAddress;
 bool roleLocked = false;
-bool preferCentralRole = false;
 bool searchScanMode = true;
+ImuType activeImuType = IMU_TYPE_UNKNOWN;
 
 unsigned long lastSensorSampleMs = 0;
 unsigned long lastLinkUpdateMs = 0;
@@ -96,6 +91,18 @@ const char* roleName(LinkRole role) {
   return "WAITING";
 }
 
+const char* imuName(ImuType imuType) {
+  if (imuType == IMU_TYPE_REV2) {
+    return "REV2 BMI270/BMM150";
+  }
+
+  if (imuType == IMU_TYPE_REV1) {
+    return "REV1 LSM9DS1";
+  }
+
+  return "UNKNOWN";
+}
+
 void debugBle(String message) {
   if (!DEBUG_BLE) {
     return;
@@ -113,20 +120,94 @@ void setRgb(bool redOn, bool greenOn, bool blueOn) {
   digitalWrite(LEDB, blueOn ? LOW : HIGH);
 }
 
+int hexValue(char value) {
+  if (value >= '0' && value <= '9') {
+    return value - '0';
+  }
+
+  if (value >= 'a' && value <= 'f') {
+    return value - 'a' + 10;
+  }
+
+  if (value >= 'A' && value <= 'F') {
+    return value - 'A' + 10;
+  }
+
+  return 0;
+}
+
+unsigned long searchTimingJitterMs() {
+  if (myAddress.length() == 0) {
+    return 900;
+  }
+
+  int lastNibble = hexValue(myAddress.charAt(myAddress.length() - 1));
+  int secondLastNibble = 0;
+
+  if (myAddress.length() > 1) {
+    secondLastNibble = hexValue(myAddress.charAt(myAddress.length() - 2));
+  }
+
+  return 300 + (unsigned long)((lastNibble * 97) + (secondLastNibble * 53));
+}
+
+unsigned long activeSearchModeDurationMs() {
+  unsigned long baseDuration = searchScanMode ? SEARCH_SCAN_MS : SEARCH_ADVERTISE_MS;
+  return baseDuration + searchTimingJitterMs();
+}
+
 // ------------------------------------------------------------
 // Motion section
-// Replace the inside of these functions if you want to use
-// another kind of motion or a different threshold strategy.
+// These functions auto-detect the built-in IMU so the same
+// sketch can be uploaded to either the earlier board or Rev2.
 // ------------------------------------------------------------
+bool beginImu() {
+  if (IMU_BMI270_BMM150.begin()) {
+    activeImuType = IMU_TYPE_REV2;
+    debugBle("IMU detected: " + String(imuName(activeImuType)));
+    return true;
+  }
+
+  if (IMU_LSM9DS1.begin()) {
+    activeImuType = IMU_TYPE_REV1;
+    debugBle("IMU detected: " + String(imuName(activeImuType)));
+    return true;
+  }
+
+  activeImuType = IMU_TYPE_UNKNOWN;
+  return false;
+}
+
+bool imuAccelerationAvailable() {
+  if (activeImuType == IMU_TYPE_REV2) {
+    return IMU_BMI270_BMM150.accelerationAvailable();
+  }
+
+  if (activeImuType == IMU_TYPE_REV1) {
+    return IMU_LSM9DS1.accelerationAvailable();
+  }
+
+  return false;
+}
+
+void imuReadAcceleration(float& x, float& y, float& z) {
+  if (activeImuType == IMU_TYPE_REV2) {
+    IMU_BMI270_BMM150.readAcceleration(x, y, z);
+    return;
+  }
+
+  IMU_LSM9DS1.readAcceleration(x, y, z);
+}
+
 bool readMotionSample(float& motionAmount) {
-  if (!IMU.accelerationAvailable()) {
+  if (!imuAccelerationAvailable()) {
     return false;
   }
 
   float accelX = 0.0f;
   float accelY = 0.0f;
   float accelZ = 0.0f;
-  IMU.readAcceleration(accelX, accelY, accelZ);
+  imuReadAcceleration(accelX, accelY, accelZ);
 
   if (!hasPreviousAcceleration) {
     previousAccelX = accelX;
@@ -233,22 +314,6 @@ void writeRemoteIncomingIfNeeded() {
   }
 }
 
-int hexValue(char value) {
-  if (value >= '0' && value <= '9') {
-    return value - '0';
-  }
-
-  if (value >= 'a' && value <= 'f') {
-    return value - 'a' + 10;
-  }
-
-  if (value >= 'A' && value <= 'F') {
-    return value - 'A' + 10;
-  }
-
-  return 0;
-}
-
 bool initialSearchModeFromAddress() {
   if (myAddress.length() == 0) {
     return true;
@@ -286,6 +351,7 @@ void resetLinkState() {
   currentRole = ROLE_WAITING;
   lastLinkUpdateMs = 0;
   disconnectedSinceMs = millis();
+  roleLocked = false;
 
   enterDiscoveryMode();
 }
@@ -310,24 +376,15 @@ bool isCandidatePeer(BLEDevice candidate) {
   return true;
 }
 
-bool shouldConnectToCandidate(BLEDevice candidate) {
-  return myAddress.compareTo(candidate.address()) < 0;
-}
-
 void lockRoleFromCandidate(BLEDevice candidate) {
   peerAddress = candidate.address();
-  preferCentralRole = shouldConnectToCandidate(candidate);
   roleLocked = true;
   disconnectedSinceMs = millis();
-
-  debugBle("lockRole peer=" + peerAddress + " prefer=" + String(preferCentralRole ? "CENTRAL" : "PERIPHERAL"));
-  enterDiscoveryMode();
+  debugBle("peer seen " + peerAddress);
 }
 
 void updateSearchModeIfNeeded() {
-  unsigned long searchModeMs = searchScanMode ? SEARCH_SCAN_MS : SEARCH_ADVERTISE_MS;
-
-  if (millis() - lastSearchModeChangeMs < searchModeMs) {
+  if (millis() - lastSearchModeChangeMs < activeSearchModeDurationMs()) {
     return;
   }
 
@@ -339,15 +396,14 @@ void retryDiscoveryIfStuck() {
     disconnectedSinceMs = millis();
   }
 
-  if (!roleLocked || millis() - disconnectedSinceMs < ROLE_RETRY_MS) {
+  if (millis() - disconnectedSinceMs < ROLE_RETRY_MS) {
     return;
   }
 
   roleLocked = false;
-  preferCentralRole = false;
   peerAddress = "";
   disconnectedSinceMs = millis();
-  debugBle("role retry timeout: clear locked role");
+  debugBle("role retry timeout: clear peer hint");
   enterDiscoveryMode();
 }
 
@@ -430,11 +486,7 @@ void tryToBecomeCentral() {
   }
 
   debugBle("candidate found name=" + candidate.localName() + " address=" + candidate.address());
-
-  if (!roleLocked) {
-    lockRoleFromCandidate(candidate);
-  }
-
+  lockRoleFromCandidate(candidate);
   connectAsCentral(candidate);
 }
 
@@ -515,6 +567,10 @@ unsigned long blinkIntervalForLevel(byte motionLevel) {
   }
 
   unsigned long intervalRange = BLINK_INTERVAL_SLOW_MS - BLINK_INTERVAL_FAST_MS;
+  if (MOTION_LEVEL_STEPS <= 1) {
+    return BLINK_INTERVAL_FAST_MS;
+  }
+
   return BLINK_INTERVAL_SLOW_MS - ((unsigned long)(motionLevel - 1) * intervalRange / (MOTION_LEVEL_STEPS - 1));
 }
 
@@ -555,15 +611,16 @@ void setup() {
   pinMode(LEDB, OUTPUT);
   setRgb(false, false, false);
 
-  if (!IMU.begin()) {
-    stopWithErrorLight();
-  }
-
   if (!BLE.begin()) {
     stopWithErrorLight();
   }
 
   myAddress = BLE.address();
+  debugBle("local address=" + myAddress);
+
+  if (!beginImu()) {
+    stopWithErrorLight();
+  }
 
   peerService.addCharacteristic(outgoingEventCharacteristic);
   peerService.addCharacteristic(incomingEventCharacteristic);

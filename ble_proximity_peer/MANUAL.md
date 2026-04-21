@@ -52,8 +52,8 @@ In this version:
 > The two boards that should talk to each other must have identical names.
 > Other pairs should use different names, for example `Nano33-Pair-01`, `Nano33-Pair-02`, and `Nano33-Pair-03`.
 >
-> If you mix an older Nano 33 BLE Sense and a Rev2 board, upload separately:
-> set `USE_REV2_IMU` to `0` before compiling for the older board, and set it to `1` before compiling for the Rev2 board.
+> This motion version is designed to work with both the earlier Nano 33 BLE Sense and the Rev2.
+> Rev2 is the default classroom target, but the sketch now auto-detects the built-in IMU at startup so the same code can be uploaded to both versions.
 
 1. Connect both boards by USB.
 2. Check the `DEVICE_NAME` near the top of the sketch.
@@ -149,7 +149,6 @@ This can be replaced with:
 ## Important Settings Near the Top of the Sketch
 
 - `DEVICE_NAME` - must be identical on the two boards in one pair, and different from other pairs in the room
-- `USE_REV2_IMU` - `0` for the earlier Nano 33 BLE Sense, `1` for Rev2
 - `MOTION_START_THRESHOLD`
 - `MOTION_STOP_THRESHOLD`
 - `MOTION_FULL_SCALE`
@@ -199,6 +198,7 @@ Examples:
 - If one board is started later than the other, wait at least 10-15 seconds. The boards take turns advertising and scanning until they find each other.
 - If one board has been unplugged or reset, the pair should reconnect automatically after a short wait.
 - If the boards connect and then disconnect repeatedly, restart both boards and check that both have the same sketch version.
+- If both boards stay blue, wait at least 10-15 seconds. This version intentionally uses slightly different search timing on each board so they do not stay stuck in the same scan/advertise rhythm.
 - If one board turns purple but the other board does not blink red, upload the same sketch again to both boards.
 - If careful handling triggers the effect too easily, raise `MOTION_START_THRESHOLD`.
 - If the LED changes too slowly for violent shaking, lower `BLINK_INTERVAL_FAST_MS`.
