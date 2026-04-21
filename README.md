@@ -2,7 +2,7 @@
 
 A simple two-device BLE prototype for the Arduino Nano 33 BLE Sense.
 
-Two boards run the same sketch. When one board detects a nearby object with its proximity sensor, the other board blinks red.
+Two boards run the same sketch. When one board is shaken, the other board blinks red, with faster blinking for stronger motion.
 
 ## Why this project exists
 
@@ -16,9 +16,9 @@ It shows how to separate a prototype into three parts:
 
 In this version:
 
-- Input: proximity sensing
+- Input: motion sensing from the built-in IMU
 - Communication: Bluetooth Low Energy
-- Output: blinking RGB LED
+- Output: red LED blinking speed linked to motion intensity
 
 ## Quick Overview
 
@@ -29,8 +29,8 @@ In this version:
 
 Current prototype:
 
-- Event: object close to proximity sensor
-- Action: fast blinking red RGB LED on the other board
+- Event: the board is moved or shaken hard enough
+- Action: the other board blinks red, faster for stronger motion
 
 ## Repository Structure
 

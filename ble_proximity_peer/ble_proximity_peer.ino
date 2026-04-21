@@ -1,10 +1,23 @@
 #include <ArduinoBLE.h>
-#include <Arduino_APDS9960.h>
+
+// Set to 1 before uploading to a Nano 33 BLE Sense Rev2.
+// Leave it at 0 for the earlier Nano 33 BLE Sense boards.
+#ifndef USE_REV2_IMU
+#define USE_REV2_IMU 1
+#endif
+
+#if USE_REV2_IMU
+#include <Arduino_BMI270_BMM150.h>
+#else
+#include <Arduino_LSM9DS1.h>
+#endif
+
+#include <math.h>
 
 // ============================================================
 // Beginner setup section
-// Change values here when you want to try a different sensor
-// or a different action.
+// Change values here when you want to tune the motion response
+// or the LED action.
 // ============================================================
 
 const char* DEVICE_NAME = "Nano33-Peer";
@@ -14,27 +27,38 @@ const char* INCOMING_EVENT_UUID = "19B10012-E8F2-537E-4F6C-D104768A1214";
 
 const bool DEBUG_BLE = false;
 
-const int EVENT_ON_THRESHOLD = 200;
-const int EVENT_OFF_THRESHOLD = 150;
-const bool EVENT_IS_ON_WHEN_VALUE_IS_HIGH = false;
+const float MOTION_START_THRESHOLD = 0.85f;
+const float MOTION_STOP_THRESHOLD = 0.45f;
+const float MOTION_FULL_SCALE = 3.20f;
+const float MOTION_SMOOTHING = 0.35f;
+const byte MOTION_LEVEL_STEPS = 12;
 
-const unsigned long SENSOR_SAMPLE_MS = 50;
-const unsigned long LINK_UPDATE_MS = 80;
-const unsigned long PEER_TIMEOUT_MS = 1000;
+const unsigned long SENSOR_SAMPLE_MS = 40;
+const unsigned long LINK_UPDATE_MS = 120;
+const unsigned long PEER_TIMEOUT_MS = 1200;
 const unsigned long ROLE_RETRY_MS = 8000;
 const unsigned long SEARCH_ADVERTISE_MS = 4000;
 const unsigned long SEARCH_SCAN_MS = 6000;
-const unsigned long BLINK_INTERVAL_MS = 120;
+const unsigned long BLINK_INTERVAL_FAST_MS = 55;
+const unsigned long BLINK_INTERVAL_SLOW_MS = 280;
 
 BLEService peerService(SERVICE_UUID);
 BLEByteCharacteristic outgoingEventCharacteristic(OUTGOING_EVENT_UUID, BLERead | BLENotify);
 BLEByteCharacteristic incomingEventCharacteristic(INCOMING_EVENT_UUID, BLERead | BLEWrite | BLEWriteWithoutResponse);
 
 String myAddress;
-bool localEventActive = false;
-bool remoteEventActive = false;
 bool remotePeerSeen = false;
 bool blinkState = false;
+
+byte localMotionLevel = 0;
+byte sentMotionLevel = 255;
+byte remoteMotionLevel = 0;
+
+float filteredMotion = 0.0f;
+float previousAccelX = 0.0f;
+float previousAccelY = 0.0f;
+float previousAccelZ = 0.0f;
+bool hasPreviousAcceleration = false;
 
 BLEDevice connectedPeripheral;
 BLECharacteristic remoteOutgoingEventCharacteristic;
@@ -48,6 +72,7 @@ unsigned long lastSensorSampleMs = 0;
 unsigned long lastLinkUpdateMs = 0;
 unsigned long lastPeerSeenMs = 0;
 unsigned long lastBlinkMs = 0;
+unsigned long lastOutgoingSendMs = 0;
 unsigned long disconnectedSinceMs = 0;
 unsigned long lastSearchModeChangeMs = 0;
 
@@ -89,61 +114,123 @@ void setRgb(bool redOn, bool greenOn, bool blueOn) {
 }
 
 // ------------------------------------------------------------
-// Event section
-// Replace the inside of this function if you want to use
-// another sensor as the thing that triggers the event.
+// Motion section
+// Replace the inside of these functions if you want to use
+// another kind of motion or a different threshold strategy.
 // ------------------------------------------------------------
-int readEventSensorValue() {
-  if (!APDS.proximityAvailable()) {
-    return -1;
+bool readMotionSample(float& motionAmount) {
+  if (!IMU.accelerationAvailable()) {
+    return false;
   }
 
-  return APDS.readProximity();
+  float accelX = 0.0f;
+  float accelY = 0.0f;
+  float accelZ = 0.0f;
+  IMU.readAcceleration(accelX, accelY, accelZ);
+
+  if (!hasPreviousAcceleration) {
+    previousAccelX = accelX;
+    previousAccelY = accelY;
+    previousAccelZ = accelZ;
+    hasPreviousAcceleration = true;
+    motionAmount = 0.0f;
+    return true;
+  }
+
+  float deltaX = accelX - previousAccelX;
+  float deltaY = accelY - previousAccelY;
+  float deltaZ = accelZ - previousAccelZ;
+
+  previousAccelX = accelX;
+  previousAccelY = accelY;
+  previousAccelZ = accelZ;
+
+  motionAmount = sqrt(deltaX * deltaX + deltaY * deltaY + deltaZ * deltaZ);
+  return true;
 }
 
-bool shouldEventBeActive(int sensorValue, bool previousState) {
-  if (sensorValue < 0) {
-    return previousState;
+byte quantizeMotionLevel(float motionAmount, byte previousLevel) {
+  float threshold = previousLevel > 0 ? MOTION_STOP_THRESHOLD : MOTION_START_THRESHOLD;
+  if (motionAmount <= threshold) {
+    return 0;
   }
 
-  if (EVENT_IS_ON_WHEN_VALUE_IS_HIGH) {
-    if (!previousState && sensorValue >= EVENT_ON_THRESHOLD) {
-      return true;
-    }
-
-    if (previousState && sensorValue <= EVENT_OFF_THRESHOLD) {
-      return false;
-    }
-  } else {
-    if (!previousState && sensorValue <= EVENT_ON_THRESHOLD) {
-      return true;
-    }
-
-    if (previousState && sensorValue >= EVENT_OFF_THRESHOLD) {
-      return false;
-    }
+  float usableRange = MOTION_FULL_SCALE - threshold;
+  if (usableRange <= 0.0f) {
+    return MOTION_LEVEL_STEPS;
   }
 
-  return previousState;
+  float scaled = (motionAmount - threshold) / usableRange;
+  if (scaled < 0.0f) {
+    scaled = 0.0f;
+  }
+  if (scaled > 1.0f) {
+    scaled = 1.0f;
+  }
+
+  return (byte)(1 + (scaled * (MOTION_LEVEL_STEPS - 1)));
 }
 
-void updateLocalEvent() {
+void updateLocalMotion() {
   if (millis() - lastSensorSampleMs < SENSOR_SAMPLE_MS) {
     return;
   }
 
   lastSensorSampleMs = millis();
-  int sensorValue = readEventSensorValue();
-  localEventActive = shouldEventBeActive(sensorValue, localEventActive);
+
+  float motionAmount = 0.0f;
+  if (!readMotionSample(motionAmount)) {
+    return;
+  }
+
+  filteredMotion = (filteredMotion * (1.0f - MOTION_SMOOTHING)) + (motionAmount * MOTION_SMOOTHING);
+  localMotionLevel = quantizeMotionLevel(filteredMotion, localMotionLevel);
+}
+
+bool localEventActive() {
+  return localMotionLevel > 0;
+}
+
+bool remoteEventActive() {
+  return remoteMotionLevel > 0;
 }
 
 // ------------------------------------------------------------
 // BLE communication section
-// This part keeps one BLE connection alive and moves event
-// state in both directions over that single connection.
+// This part keeps one BLE connection alive and moves motion
+// levels in both directions over that single connection.
 // ------------------------------------------------------------
-void updateOutgoingCharacteristic() {
-  outgoingEventCharacteristic.writeValue(localEventActive ? 1 : 0);
+void updateOutgoingCharacteristic(bool forceSend = false) {
+  if (!forceSend && localMotionLevel == sentMotionLevel) {
+    return;
+  }
+
+  if (!forceSend && millis() - lastOutgoingSendMs < LINK_UPDATE_MS) {
+    return;
+  }
+
+  outgoingEventCharacteristic.writeValue(localMotionLevel);
+  sentMotionLevel = localMotionLevel;
+  lastOutgoingSendMs = millis();
+}
+
+void writeRemoteIncomingIfNeeded() {
+  if (!remoteIncomingEventCharacteristic) {
+    return;
+  }
+
+  if (millis() - lastOutgoingSendMs < LINK_UPDATE_MS) {
+    return;
+  }
+
+  if (localMotionLevel == sentMotionLevel) {
+    return;
+  }
+
+  if (remoteIncomingEventCharacteristic.writeValue(localMotionLevel)) {
+    sentMotionLevel = localMotionLevel;
+    lastOutgoingSendMs = millis();
+  }
 }
 
 int hexValue(char value) {
@@ -189,18 +276,12 @@ void enterDiscoveryMode() {
   startSearchMode(searchScanMode);
 }
 
-void enterPeripheralWaitMode() {
-  debugBle("enterPeripheralWaitMode: advertise only");
-  BLE.stopScan();
-  BLE.advertise();
-}
-
 void resetLinkState() {
   debugBle("resetLinkState from role " + String(roleName(currentRole)));
   connectedPeripheral = BLEDevice();
   remoteOutgoingEventCharacteristic = BLECharacteristic();
   remoteIncomingEventCharacteristic = BLECharacteristic();
-  remoteEventActive = false;
+  remoteMotionLevel = 0;
   remotePeerSeen = false;
   currentRole = ROLE_WAITING;
   lastLinkUpdateMs = 0;
@@ -327,6 +408,7 @@ bool connectAsCentral(BLEDevice candidate) {
   remotePeerSeen = true;
   lastPeerSeenMs = millis();
   BLE.stopAdvertise();
+  sentMotionLevel = 255;
   debugBle("connectAsCentral success peer=" + candidate.address());
   return true;
 }
@@ -369,7 +451,9 @@ void updatePeripheralLink() {
   updateOutgoingCharacteristic();
 
   if (incomingEventCharacteristic.written()) {
-    remoteEventActive = (incomingEventCharacteristic.value() != 0);
+    remoteMotionLevel = incomingEventCharacteristic.value();
+    remotePeerSeen = true;
+    lastPeerSeenMs = millis();
   }
 }
 
@@ -387,12 +471,12 @@ void updateCentralLink() {
 
   byte remoteValue = 0;
   if (remoteOutgoingEventCharacteristic.readValue(remoteValue)) {
-    remoteEventActive = (remoteValue != 0);
+    remoteMotionLevel = remoteValue;
     remotePeerSeen = true;
     lastPeerSeenMs = millis();
   }
 
-  remoteIncomingEventCharacteristic.writeValue((byte)(localEventActive ? 1 : 0));
+  writeRemoteIncomingIfNeeded();
 }
 
 void updateLink() {
@@ -415,7 +499,7 @@ void updateLink() {
 
   if (remotePeerSeen && millis() - lastPeerSeenMs > PEER_TIMEOUT_MS) {
     remotePeerSeen = false;
-    remoteEventActive = false;
+    remoteMotionLevel = 0;
     blinkState = false;
   }
 }
@@ -423,11 +507,21 @@ void updateLink() {
 // ------------------------------------------------------------
 // Action section
 // Replace this function if you want a different response when
-// the other board's event becomes active.
+// the other board's motion level becomes active.
 // ------------------------------------------------------------
+unsigned long blinkIntervalForLevel(byte motionLevel) {
+  if (motionLevel == 0) {
+    return BLINK_INTERVAL_SLOW_MS;
+  }
+
+  unsigned long intervalRange = BLINK_INTERVAL_SLOW_MS - BLINK_INTERVAL_FAST_MS;
+  return BLINK_INTERVAL_SLOW_MS - ((unsigned long)(motionLevel - 1) * intervalRange / (MOTION_LEVEL_STEPS - 1));
+}
+
 void runActionFromRemoteEvent() {
-  if (remoteEventActive) {
-    if (millis() - lastBlinkMs >= BLINK_INTERVAL_MS) {
+  if (remoteEventActive()) {
+    unsigned long blinkIntervalMs = blinkIntervalForLevel(remoteMotionLevel);
+    if (millis() - lastBlinkMs >= blinkIntervalMs) {
       lastBlinkMs = millis();
       blinkState = !blinkState;
       setRgb(blinkState, false, false);
@@ -437,7 +531,7 @@ void runActionFromRemoteEvent() {
 
   blinkState = false;
 
-  if (localEventActive) {
+  if (localEventActive()) {
     setRgb(true, false, true);
   } else if (remotePeerSeen) {
     setRgb(false, true, false);
@@ -461,7 +555,7 @@ void setup() {
   pinMode(LEDB, OUTPUT);
   setRgb(false, false, false);
 
-  if (!APDS.begin()) {
+  if (!IMU.begin()) {
     stopWithErrorLight();
   }
 
@@ -487,7 +581,7 @@ void setup() {
 void loop() {
   BLE.poll();
 
-  updateLocalEvent();
+  updateLocalMotion();
   updateLink();
   runActionFromRemoteEvent();
 }
