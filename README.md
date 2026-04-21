@@ -2,6 +2,25 @@
 
 This repository now contains three Arduino sketches for BLE-based interactive prototyping with the Arduino Nano 33 BLE Sense family.
 
+## Important Hardware Note
+
+The split motion pair is for:
+
+- Arduino Nano 33 BLE Sense Rev2 only
+
+These Rev2-only sketches are:
+
+- `ble_motion_shaker/ble_motion_shaker.ino`
+- `ble_motion_responder/ble_motion_responder.ino`
+
+They use the Rev2 IMU library:
+
+- `Arduino_BMI270_BMM150`
+
+The original symmetric sketch is kept as a separate teaching example:
+
+- `ble_proximity_peer/ble_proximity_peer.ino`
+
 ## Sketches
 
 ### 1. Symmetric proximity example
@@ -77,7 +96,7 @@ For the peacock chick / father project, the one-way pattern is the recommended o
 ## Hardware Notes
 
 - `ble_proximity_peer` was kept as the original symmetric example
-- the split motion sketches are intended for Arduino Nano 33 BLE Sense Rev2
+- the split motion sketches are intended for Arduino Nano 33 BLE Sense Rev2 only
 - the motion sketches use `Arduino_BMI270_BMM150`
 
 ## LED Meanings For The Motion Pair
